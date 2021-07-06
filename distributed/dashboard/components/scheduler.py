@@ -72,6 +72,7 @@ from distributed.diagnostics.task_stream import TaskStreamPlugin
 from distributed.diagnostics.task_stream import color_of as ts_color_of
 from distributed.diagnostics.task_stream import colors as ts_color_lookup
 from distributed.metrics import time
+from distributed.scheduler import TaskGroup
 from distributed.utils import Log, log_errors
 
 if dask.config.get("distributed.dashboard.export-tool"):
@@ -1955,25 +1956,56 @@ class TaskGroupGraph(DashboardComponent):
 
         self.root.add_tools(hover)
 
+    def get_task_groups(self):
+        task_groups = self.scheduler.task_groups
+
+        def combine_groups(key, groups):
+            prefix, dependencies = key
+            oneof = groups[0]
+            tg = TaskGroup(name=prefix)
+            tg._prefix = oneof.prefix
+            tg._dependencies = {key_split(d.name) for d in dependencies}
+            tg._duration = sum([g.duration for g in groups])
+            tg._nbytes_total = sum([g.nbytes_total for g in groups])
+            tg._types = oneof.types
+            tg._states.update(
+                {
+                    "memory": sum(g.states["memory"] for g in groups),
+                    "processing": sum(g.states["processing"] for g in groups),
+                    "erred": sum(g.states["erred"] for g in groups),
+                    "released": sum(g.states["released"] for g in groups),
+                }
+            )
+            return tg
+
+        def prefix_and_deps(value):
+            return value.prefix.name, frozenset(value.dependencies)
+
+        return {
+            k[0]: combine_groups(k, v)
+            for k, v in groupby(prefix_and_deps, task_groups.values()).items()
+        }
+
     @without_property_validation
     def update_layout(self):
 
         with log_errors():
             # get dependecies per task group
             # in some cases there are tg that have themeselves as dependencies, we remove those.
+            task_groups = self.get_task_groups()
             dependencies = {
-                k: {ds.name for ds in ts.dependencies if ds.name != k}
-                for k, ts in self.scheduler.task_groups.items()
+                k: {ds for ds in ts.dependencies if ds != k}
+                for k, ts in task_groups.items()
             }
 
             import dask
 
             order = dask.order.order(
-                dsk={group.name: 1 for k, group in self.scheduler.task_groups.items()},
+                dsk={group.name: 1 for k, group in task_groups.items()},
                 dependencies=dependencies,
             )
 
-            ordered = sorted(self.scheduler.task_groups, key=order.get)
+            ordered = sorted(task_groups, key=order.get)
 
             xs = {}
             ys = {}
@@ -2022,17 +2054,18 @@ class TaskGroupGraph(DashboardComponent):
     @without_property_validation
     def update(self):
 
+        task_groups = self.get_task_groups()
         if self.scheduler.transition_counter == self.old_counter:
             return
         else:
             self.old_counter = self.scheduler.transition_counter
 
-        if not self.scheduler.task_groups:
+        if not task_groups:
             self.subtitle.text = "Scheduler is empty."
         else:
             self.subtitle.text = " "
 
-        if self.nodes_layout.keys() != self.scheduler.task_groups.keys():
+        if self.nodes_layout.keys() != task_groups.keys():
             self.nodes_layout, self.arrows_layout = self.update_layout()
 
         nodes_data = {
@@ -2073,7 +2106,7 @@ class TaskGroupGraph(DashboardComponent):
 
         durations = set()
         nbytes = set()
-        for key, tg in self.scheduler.task_groups.items():
+        for key, tg in task_groups.items():
 
             if tg.duration and tg.nbytes_total:
                 durations.add(tg.duration)
@@ -2085,7 +2118,7 @@ class TaskGroupGraph(DashboardComponent):
         nbytes_max = max(nbytes, default=0)
 
         box_dim = {}
-        for key, tg in self.scheduler.task_groups.items():
+        for key, tg in task_groups.items():
 
             comp_tasks = (
                 tg.states["released"] + tg.states["memory"] + tg.states["erred"]
@@ -2121,7 +2154,7 @@ class TaskGroupGraph(DashboardComponent):
 
             box_dim[key] = {"width": width_box, "height": height_box}
 
-        for key, tg in self.scheduler.task_groups.items():
+        for key, tg in task_groups.items():
             x = self.nodes_layout[key]["x"]
             y = self.nodes_layout[key]["y"]
             width = box_dim[key]["width"]
@@ -2136,7 +2169,10 @@ class TaskGroupGraph(DashboardComponent):
             comp_tasks = (
                 tg.states["released"] + tg.states["memory"] + tg.states["erred"]
             )
-            tot_tasks = sum(tg.states.values())
+
+            # Avoid a divide by zero by using a very large total tasks if not yet
+            # populated
+            tot_tasks = sum(tg.states.values()) or 1e12
 
             nodes_data["name"].append(tg.prefix.name)
 
@@ -2145,7 +2181,7 @@ class TaskGroupGraph(DashboardComponent):
 
             # memory alpha factor by 0.4 if not get's too dark
             nodes_data["mem_alpha"].append(
-                (tg.states["memory"] / sum(tg.states.values())) * 0.4
+                (tg.states["memory"] / tot_tasks * 0.4) if tot_tasks else 0.0
             )
 
             # main box line width
