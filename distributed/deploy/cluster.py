@@ -389,8 +389,7 @@ class Cluster(SyncMethodMixin):
                 layout=Layout(min_width="500px"),
             )
             accordion.selected_index = None
-            accordion.set_title(0, "Manual Scaling")
-            accordion.set_title(1, "Adaptive Scaling")
+            accordion.titles = ["Manual Scaling", "Adaptive Scaling"]
 
             def adapt_cb(b):
                 self.adapt(minimum=minimum.value, maximum=maximum.value)
@@ -414,8 +413,7 @@ class Cluster(SyncMethodMixin):
 
         tab = Tab()
         tab.children = [status, VBox([scale_status, accordion])]
-        tab.set_title(0, "Status")
-        tab.set_title(1, "Scaling")
+        tab.titles = ["Status", "Scaling"]
 
         self._cached_widget = tab
 
@@ -448,15 +446,15 @@ class Cluster(SyncMethodMixin):
             cluster_status=cluster_status,
         )
 
-    def _ipython_display_(self, **kwargs):
+    def _repr_mimebundle_(self, **kwargs):
         widget = self._widget()
         if widget is not None:
-            return widget._ipython_display_(**kwargs)
+            mimebundle = widget._repr_mimebundle_(**kwargs) or {}
         else:
-            from IPython.display import display
-
-            data = {"text/plain": repr(self), "text/html": self._repr_html_()}
-            display(data, raw=True)
+            mimebundle = {}
+        mimebundle["text/plain"] = repr(self)
+        mimebundle["text/html"] = self._repr_html_()
+        return mimebundle
 
     def __enter__(self):
         return self.sync(self.__aenter__)
